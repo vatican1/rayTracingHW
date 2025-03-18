@@ -850,15 +850,12 @@ const Scene * parceScene(const std::string & fileName)
 
 int main(int argc, char *argv[])
 {
-
-    glm::vec3 v(0.22, 0.33, 0.54);
-    glm::vec4 q(0.1, 0.93, 0.34, 0.56);
-    glm::vec3 v1 = rotate(v, q);
-
     std::cout << "start" << std::endl;
     assert(argc == 3);
     const Scene * scene = parceScene(argv[1]);
+    std::cout << "end parce" << std::endl;
     scene->render();
+    std::cout << "end render" << std::endl;
     scene->save(argv[2]);
     std::cout << "finish" << std::endl;
     return 0;
