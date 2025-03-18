@@ -9,7 +9,7 @@
 
 
 inline glm::vec3 rotate(const glm::vec3 v, const glm::vec4 q) {
-    glm::vec3 u = glm::vec3(-q.x, -q.y, -q.z);
+    const glm::vec3 u = glm::vec3(q.x, q.y, q.z);
     float s = q.w;
 
     return 2.f * dot(u, v) * u +
@@ -17,22 +17,42 @@ inline glm::vec3 rotate(const glm::vec3 v, const glm::vec4 q) {
            2.f * s * cross(u, v);
 }
 
-inline glm::vec3 rotate(glm::vec3 v, glm::vec3 axis, float angle)
-{
-    float sin = std::sin(angle) / 2;
-    axis = axis * sin;
-    return rotate(v, {axis.x, axis.y, axis.z, std::cos(angle / 2)});
+inline glm::vec3 saturate(const glm::vec3 &color) {
+    return clamp(color, {0.f, 0.f, 0.f}, {1.f, 1.f, 1.f});
 }
+
+inline glm::vec3 acesTonemap(const glm::vec3 & x) {
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+    return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+
+struct Intersection
+{
+    float distance;
+    glm::vec3 normal;
+    bool fromOutside;
+
+    glm::vec3 color{0.f, 0.f, 0.f};
+};
 
 struct Ray
 {
     Ray(glm::vec3 from_, glm::vec3 direction_) :
         from(from_),
-        direction(direction_)
+        direction(glm::normalize(direction_))
     {}
 
     glm::vec3 from;
     glm::vec3 direction;
+
+    void shiftStart(const float & dist = 1e-3)
+    {
+        from += direction * dist;
+    }
 };
 
 struct Plane
@@ -50,6 +70,60 @@ struct Box
     glm::vec3 m_sizes;
 };
 
+
+float t_Plane(const Plane & plane, const Ray & ray)
+{
+    return - dot(ray.from, plane.m_normal) / dot(ray.direction, plane.m_normal);
+}
+
+std::pair<float, float> t1_t2_Ellipsiod(const Ellipsoide & ellipsoid, const Ray & ray, bool * ok)
+{
+    *ok = true;
+    float a, b, c;
+    glm::vec3 o_div_r = ray.from      / ellipsoid.m_radiuses;
+    glm::vec3 d_div_r = ray.direction / ellipsoid.m_radiuses;
+    a = dot(d_div_r, d_div_r);
+    b = dot(o_div_r, d_div_r);
+    c = dot(o_div_r, o_div_r);
+
+    float h = b * b - a * (c - 1.f);
+    if( h < 0.f )
+    {
+        *ok = false;
+        std::make_pair(0.f, 0.f);
+    }
+    h = std::sqrt(h);
+    float t1 = (-b - h) / a;
+    float t2 = (-b + h) / a;
+
+    return std::make_pair(t1, t2);
+}
+
+std::pair<float, float> t1Max_t2Min_Box(const Box & box, const Ray & ray)
+{
+    glm::vec3 t1, t2;
+    for (int i = 0; i < 3; ++i)
+    {
+        t1[i] = (-box.m_sizes[i] - ray.from[i]) / ray.direction[i];
+        t2[i] = (box.m_sizes[i] - ray.from[i]) / ray.direction[i];
+        if (t1[i] > t2[i])
+            std::swap(t1[i], t2[i]);
+    }
+
+    float t1Max = std::max(std::max(t1.x, t1.y), t1.z);
+    float t2Min = std::min(std::min(t2.x, t2.y), t2.z);
+
+    return std::make_pair(t1Max, t2Min);
+}
+
+enum OBJECT_MATERIAL
+{
+    OM_METALLIC = 0,
+    OM_DIELECTRIC,
+    OM_DIFUSS
+};
+
+
 struct SceneObject
 {
     std::variant<Plane, Ellipsoide, Box> m_primitive;
@@ -57,19 +131,118 @@ struct SceneObject
     glm::vec4 m_rotation = glm::vec4(0.f, 0.f, 0.f, 1.f);
     glm::vec3 m_color;
 
-    std::optional<float> intersects(Ray ray) const
+    OBJECT_MATERIAL m_objectMaterial = OM_DIFUSS;
+    float m_ior;
+
+
+    void prepareRay(Ray & ray) const
     {
         ray.from -= m_position;
 
-        ray.from = rotate(ray.from, m_rotation);
-        ray.direction = rotate(ray.direction, m_rotation);
+        ray.from = rotate(ray.from, {-m_rotation.x,-m_rotation.y,-m_rotation.z, m_rotation.w} );
+        ray.direction = rotate(ray.direction, {-m_rotation.x,-m_rotation.y,-m_rotation.z, m_rotation.w});
+    }
 
+    // Вызывается, если уверенны, что пересечение есть!
+    Intersection intersectFull(Ray ray) const
+    {
+        prepareRay(ray);
         switch (m_primitive.index())
         {
         case 0:
         {
-            Plane plane = std::get<Plane>(m_primitive);
-            float t = - dot(ray.from, plane.m_normal) / dot(ray.direction, plane.m_normal);
+            const Plane & plane = std::get<Plane>(m_primitive);
+            float t = t_Plane (plane, ray);
+            assert(t >= 0.f);
+
+            Intersection intersection;
+            intersection.distance = t;
+            intersection.normal = plane.m_normal;
+            intersection.fromOutside = true;
+
+            intersection.normal = rotate(intersection.normal, m_rotation);
+
+            return intersection;
+        }
+        case 1:
+        {
+            Ellipsoide ellipsoid = std::get<Ellipsoide>(m_primitive);
+
+            bool ok;
+            float t1, t2;
+            std::tie(t1, t2) = t1_t2_Ellipsiod(ellipsoid, ray, &ok);
+            assert(ok);
+
+            Intersection intersection;
+            intersection.distance = t1 > 0 ? t1 : t2;
+            intersection.fromOutside = t1 > 0;
+            glm::vec3 interPoint = ray.from + intersection.distance * ray.direction;
+            intersection.normal = interPoint / ellipsoid.m_radiuses;
+
+            intersection.normal = rotate(intersection.normal, m_rotation);
+
+            if (!intersection.fromOutside)
+                intersection.normal = -intersection.normal;
+
+            return intersection;
+
+        }
+        case 2:
+        {
+            Box box = std::get<Box>(m_primitive);
+
+            float t1Max, t2Min;
+
+            std::tie(t1Max, t2Min) = t1Max_t2Min_Box(box, ray);
+
+            // оставлено на дальнейшее растаскивание
+            Intersection intersection;
+            intersection.distance = t1Max > 0 ? t1Max : t2Min;
+            intersection.fromOutside = t1Max > 0;
+            glm::vec3 interPoint = ray.from + intersection.distance * ray.direction;
+
+            intersection.normal = interPoint / box.m_sizes;
+
+            int maxIdx = 0;
+            {
+                float maxDist = 0.f;
+                for (int i = 0; i < 3; ++i)
+                {
+                    if (std::abs(intersection.normal[i]) >= maxDist)
+                    {
+                        maxDist = std::abs(intersection.normal[i]);
+                        maxIdx = i;
+                    }
+                }
+            }
+
+            intersection.normal = {(maxIdx == 0 ? (intersection.normal[0] > 0.f ? 1.f : -1.f) : 0.f),
+                                   (maxIdx == 1 ? (intersection.normal[1] > 0.f ? 1.f : -1.f) : 0.0),
+                                   (maxIdx == 2 ? (intersection.normal[2] > 0.f ? 1.f : -1.f) : 0.0)};
+
+            if (!intersection.fromOutside)
+                intersection.normal = -intersection.normal;
+
+            intersection.normal = rotate(intersection.normal, m_rotation);
+
+            return intersection;
+        }
+        default:
+            break;
+        }
+        return Intersection();
+    }
+
+    // Возвращает либо больше нуля, либо std::nullopt
+    std::optional<float> intersectsSimple(Ray ray) const
+    {
+        prepareRay(ray);
+        switch (m_primitive.index())
+        {
+        case 0:
+        {
+            const Plane & plane = std::get<Plane>(m_primitive);
+            float t = t_Plane (plane, ray);
 
             if (t < 0.f)
                 return std::nullopt;
@@ -78,20 +251,11 @@ struct SceneObject
         case 1:
         {
             Ellipsoide ellipsoid = std::get<Ellipsoide>(m_primitive);
-            float a, b, c;
-            glm::vec3 o_div_r = ray.from      / ellipsoid.m_radiuses;
-            glm::vec3 d_div_r = ray.direction / ellipsoid.m_radiuses;
-            a = dot(d_div_r, d_div_r);
-            b = dot(o_div_r, d_div_r);
-            c = dot(o_div_r, o_div_r);
-
-            float h = b * b - a * (c - 1.f);
-            if( h < 0.f )
+            bool ok;
+            float t1, t2;
+            std::tie(t1, t2) = t1_t2_Ellipsiod(ellipsoid, ray, &ok);
+            if(!ok)
                 return std::nullopt;
-
-            h = std::sqrt(h);
-            float t1 = (-b - h) / a;
-            float t2 = (-b + h) / a;
 
             if (t2 < 0)
                 return std::nullopt;
@@ -103,25 +267,17 @@ struct SceneObject
         case 2:
         {
             Box box = std::get<Box>(m_primitive);
-            glm::vec3 t1;
-            glm::vec3 t2;
-            for (int i = 0; i < 3; ++i)
-            {
-                t1[i] = (-box.m_sizes[i] - ray.from[i]) / ray.direction[i];
-                t2[i] = (box.m_sizes[i] - ray.from[i]) / ray.direction[i];
-                if (t1[i] > t2[i])
-                    std::swap(t1[i], t2[i]);
-            }
 
-            float t1_max = std::max(std::max(t1.x, t1.y), t1.z);
-            float t2_min = std::min(std::min(t2.x, t2.y), t2.z);
+            float t1Max, t2Min;
 
-            if (t1_max > t2_min || t2_min < 0)
+            std::tie(t1Max, t2Min) = t1Max_t2Min_Box(box, ray);
+
+            if (t1Max > t2Min || t2Min < 0)
                 return std::nullopt;
 
-            if (t1_max < 0)
-                t1_max = t2_min;
-            return std::make_optional(t1_max);
+            if (t1Max < 0)
+                t1Max = t2Min;
+            return std::make_optional(t1Max);
         }
         default:
             break;
@@ -235,13 +391,101 @@ private:
     CameraParams m_params;
 };
 
+struct Light
+{
+    explicit Light(const glm::vec3 & m_lightIntensity)
+        : m_lightIntensity(m_lightIntensity)
+    {}
+
+    virtual Ray rayFrom(glm::vec3 from) const = 0;
+    virtual bool isObscuredObject(const Ray & ray, const float distToObj) const = 0;
+    //свет из источника в точке
+    virtual glm::vec3 colorDist(const glm::vec3 & from) const = 0;
+
+    glm::vec3 m_lightIntensity;
+};
+
+struct PointLight : public Light
+{
+    PointLight(const glm::vec3 & lightIntensity,
+               const glm::vec3 & lightPosition,
+               const glm::vec3 & lightAttenuation):
+        m_lightPosition(lightPosition),
+        m_lightAttenuation(lightAttenuation),
+        ::Light(lightIntensity)
+    {}
+
+    virtual Ray rayFrom(glm::vec3 from) const
+    {
+        Ray ray(from, m_lightPosition - from);
+        return ray;
+    }
+
+    virtual bool isObscuredObject(const Ray & ray, const float distToObj) const
+    {
+        return glm::length(ray.from - m_lightPosition) > distToObj;
+    }
+
+
+    virtual glm::vec3 colorDist(const glm::vec3 & from) const
+    {
+        float dist = glm::length(from - m_lightPosition);
+        return m_lightIntensity * (1.f / (m_lightAttenuation[0] +
+                                          m_lightAttenuation[1] * dist +
+                                          m_lightAttenuation[2] * dist * dist));
+    }
+
+
+    glm::vec3 m_lightPosition;
+    glm::vec3 m_lightAttenuation;
+};
+
+struct DirectionalLight : public Light
+{
+    DirectionalLight(const glm::vec3 & lightIntensity,
+                     const glm::vec3 & lightDirection):
+        m_lightDirection(lightDirection),
+        ::Light(lightIntensity)
+    {}
+
+    virtual Ray rayFrom(glm::vec3 from) const
+    {
+        Ray ray(from, m_lightDirection);
+        return ray;
+    }
+
+    virtual bool isObscuredObject(const Ray & ray, const float distToObj) const
+    {
+        return distToObj > 0.f;
+    }
+
+    virtual glm::vec3 colorDist(const glm::vec3 & from) const
+    {
+        return m_lightIntensity;
+    }
+
+    glm::vec3 m_lightDirection;
+};
+
+enum LIGHT_TYPE
+{
+    LT_UNKNOWN,
+    LT_POINT,
+    LT_DIRECTIONAL
+};
+
 
 struct Scene
 {
     glm::vec3 m_bgColor;
 
+    int m_rayDepth;
+    glm::vec3 m_ambientLight;
+
     Canvas * p_canvas;
     Camera * p_camera;
+
+    std::vector<Light *> m_lights;
 
     std::vector<SceneObject> m_sceneObjects;
 
@@ -260,6 +504,119 @@ struct Scene
         return Ray(p_camera->getPosition(), d);
     }
 
+    std::optional<glm::vec3> colorFromRay(const Ray & ray, int currDepth) const
+    {
+        ++currDepth;
+        if(currDepth >= m_rayDepth)
+        {
+            return std::make_optional(glm::vec3(0.f, 0.f, 0.f));
+        }
+
+        int objNumber;
+        float distanceToObject;
+        std::tie(objNumber, distanceToObject) = findNearestObject(ray);
+        if(objNumber == -1)
+        {
+            return std::nullopt;
+        }
+
+        const SceneObject & object = m_sceneObjects[objNumber];
+        Intersection intersection = object.intersectFull(ray);
+
+        glm::vec3 intersectionEnd = ray.from + ray.direction * intersection.distance; // Пересечение объекта и луча из камеры
+
+        if(object.m_objectMaterial == OM_DIFUSS)
+        {
+            intersection.color = object.m_color * m_ambientLight;
+            for (const Light * light : m_lights)
+            {
+                Ray rayToLight = light->rayFrom(intersectionEnd);
+                rayToLight.shiftStart();
+                bool isObscured;
+                {
+                    int objNumberIntersect;
+                    float distanceToObjectIntersect;
+                    std::tie(objNumberIntersect, distanceToObjectIntersect) = findNearestObject(rayToLight);
+                    if(objNumberIntersect == -1)
+                        isObscured =  false;
+                    else
+                        isObscured = light->isObscuredObject(rayToLight, distanceToObjectIntersect);
+                }
+                if(isObscured)
+                    continue;
+
+                glm::vec3 light_color = light->colorDist(intersectionEnd);
+
+                light_color = light_color * std::max(0.f, dot(rayToLight.direction, intersection.normal));
+                intersection.color += m_sceneObjects[objNumber].m_color * light_color;
+            }
+            return  intersection.color;
+        }
+        else if(object.m_objectMaterial == OM_DIELECTRIC)
+        {
+            const float cosIn = -dot(intersection.normal, ray.direction);
+            const float eta1 = intersection.fromOutside ? 1.f : object.m_ior;
+            const float eta2 = intersection.fromOutside ? object.m_ior : 1.f;
+
+            const float sinOut = (eta1 / eta2) * std::sqrt(1 - cosIn * cosIn);
+
+            float reflectionCoefficient = 1.f;
+            if (sinOut < 1.f)
+            {
+                const float R0 = std::pow((eta1 - eta2) / (eta1 + eta2), 2.f);
+                reflectionCoefficient = R0 + (1.f - R0) * std::pow(1.f - cosIn, 5.f);
+            }
+//!---------------------------------------------------------------------------------------------------
+            glm::vec3 dir1 = ray.direction + intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
+            Ray reflectRay(intersectionEnd, dir1);
+            reflectRay.shiftStart();
+            const std::optional<glm::vec3> appendColor1 = colorFromRay(reflectRay, currDepth);
+
+            if (appendColor1)
+                intersection.color += reflectionCoefficient * appendColor1.value();
+            else
+                intersection.color += reflectionCoefficient * m_bgColor;
+//!---------------------------------------------------------------------------------------------------
+            if(sinOut >= 1.f)
+                return intersection.color;
+
+            float cosOut = std::sqrt(1 - sinOut * sinOut);
+            const glm::vec3 dir2 = (eta1 / eta2) * ray.direction + ((eta1 / eta2) * cosIn - cosOut) * intersection.normal;
+
+            Ray reflectRay2(intersectionEnd, dir2);
+            reflectRay2.shiftStart();
+            const std::optional<glm::vec3> appendColor2 = colorFromRay(reflectRay2, currDepth);
+
+            glm::vec3 currColor(0.f, 0.f, 0.f);
+            if (appendColor2)
+            {
+                currColor = (1 - reflectionCoefficient) * appendColor2.value();
+                if(intersection.fromOutside)
+                    intersection.color *= object.m_color;
+            }
+            else
+                currColor = (1 - reflectionCoefficient) * m_bgColor;
+            intersection.color += currColor;
+//!---------------------------------------------------------------------------------------------------
+            return intersection.color;
+        }
+        else if(object.m_objectMaterial == OM_METALLIC)
+        {
+            glm::vec3 dir = ray.direction - intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
+            Ray reflectRay(intersectionEnd, dir);
+            reflectRay.shiftStart();
+            const std::optional<glm::vec3> appendColor = colorFromRay(reflectRay, currDepth);
+
+            if (appendColor)
+                intersection.color += object.m_color * appendColor.value();
+            else
+                intersection.color += object.m_color * m_bgColor;
+
+            return intersection.color;
+        }
+        return std::nullopt;
+    }
+
     void render() const
     {
         if(!p_canvas)
@@ -272,25 +629,43 @@ struct Scene
         {
             for (int j = 0; j < p_canvas->h; ++j)
             {
-                Ray ray = canvasToCamera(i, j);
+                const Ray ray = canvasToCamera(i, j);
 
-                glm::vec3 color = m_bgColor;
-                float distance = 1e9;
+                glm::vec3 color;
 
-                for (const SceneObject & object : m_sceneObjects)
-                {
-                    std::optional<float> intersection = object.intersects(ray);
-                    if (intersection && intersection.value() < distance)
-                    {
-                        distance = intersection.value();
-                        color = object.m_color;
-                    }
-                }
+                std::optional<glm::vec3> colorOpt = colorFromRay(ray, 0);
+                if(!colorOpt)
+                    color  = m_bgColor;
+                else
+                    color = colorOpt.value();
+
+                color = acesTonemap(color);
+                color = glm::pow(color, glm::vec3(1.f / 2.2f));
 
                 p_canvas->setPixelColor(i, j, color);
+
             }
         }
     }
+
+    // Возвращает номер ближайшего по лучу объекта или -1 и дистанцию
+    std::pair<int, float> findNearestObject(const Ray & ray) const
+    {
+        float distance = 1e9;
+        int objectNumber = -1;
+        for (size_t i = 0; i < m_sceneObjects.size(); ++i)
+        {
+            const SceneObject & object = m_sceneObjects[i];
+            std::optional<float> intersection = object.intersectsSimple(ray);
+            if (intersection && intersection.value() < distance)
+            {
+                distance = intersection.value();
+                objectNumber = int(i);
+            }
+        }
+        return std::make_pair(objectNumber, objectNumber == -1 ? -1.f : distance);
+    }
+
 
 
     void save(const std::string & fileName) const
@@ -325,18 +700,88 @@ const Scene * parceScene(const std::string & fileName)
         } else if (key == "BG_COLOR") {
             iss >> p_scene->m_bgColor.r >> p_scene->m_bgColor.g >> p_scene->m_bgColor.b;
         } else if (key == "CAMERA_POSITION") {
-            iss >> cameraParams.m_cameraPosition.x >> cameraParams.m_cameraPosition.y >> cameraParams.m_cameraPosition.z;
+            float x, y, z;
+            iss >> x >> y >> z;
+            cameraParams.m_cameraPosition = glm::vec3(x, y, z);
         } else if (key == "CAMERA_RIGHT") {
-            iss >> cameraParams.m_cameraRight.x >> cameraParams.m_cameraRight.y >> cameraParams.m_cameraRight.z;
+            float x, y, z;
+            iss >> x >> y >> z;
+            cameraParams.m_cameraRight = glm::vec3(x, y, z);
         } else if (key == "CAMERA_UP") {
-            iss >> cameraParams.m_cameraUp.x >> cameraParams.m_cameraUp.y >> cameraParams.m_cameraUp.z;
+            float x, y, z;
+            iss >> x >> y >> z;
+            cameraParams.m_cameraUp = glm::vec3(x, y ,z);
         } else if (key == "CAMERA_FORWARD") {
-            iss >> cameraParams.m_cameraForward.x >> cameraParams.m_cameraForward.y >> cameraParams.m_cameraForward.z;
+            float x, y, z;
+            iss >> x >> y >> z;
+            cameraParams.m_cameraForward = glm::vec3(x, y, z);
         } else if (key == "CAMERA_FOV_X") {
             iss >> cameraParams.m_cameraFovX;
+        } else if (key == "RAY_DEPTH") {
+            iss >> p_scene->m_rayDepth;
+        } else if (key == "AMBIENT_LIGHT") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            p_scene->m_ambientLight = glm::vec3(x, y, z);
+        } else if(key == "NEW_LIGHT")
+        {
+
+            LIGHT_TYPE lightType = LT_UNKNOWN;
+
+            // Все возможные параметры источников
+            glm::vec3 lightIntensity;
+
+            glm::vec3 lightPosition;
+            glm::vec3 lightAttenuation;
+
+            glm::vec3 lightDirection;
+
+            while (std::getline(file, line))
+            {
+                std::istringstream iss(line);
+                std::string key;
+                iss >> key;
+                if (key == "") {
+
+                    assert(lightType != LT_UNKNOWN);
+                    if(lightType == LT_POINT)
+                    {
+                        p_scene->m_lights.push_back(new PointLight(lightIntensity, lightPosition, lightAttenuation));
+                    }
+                    else if( lightType == LT_DIRECTIONAL)
+                    {
+                        p_scene->m_lights.push_back(new DirectionalLight(lightIntensity, lightDirection));
+                    }
+
+                    break;
+                } else if (key == "LIGHT_INTENSITY") {
+                    float x, y, z;
+                    iss >> x >> y >> z;
+                    lightIntensity = {x, y ,z};
+                } else if (key == "LIGHT_DIRECTION") {
+                    lightType = LT_DIRECTIONAL;
+                    float x, y, z;
+                    iss >> x >> y >> z;
+                    lightDirection = {x, y ,z};
+                } else if (key == "LIGHT_POSITION") {
+                    lightType = LT_POINT;
+                    float x, y, z;
+                    iss >> x >> y >> z;
+                    lightPosition = {x, y ,z};
+                } else if (key == "LIGHT_ATTENUATION") {
+                    lightType = LT_POINT;
+                    float x, y, z;
+                    iss >> x >> y >> z;
+                    lightAttenuation = {x, y ,z};
+                } else {
+                    continue;
+                }
+            }
+
         } else if(key == "NEW_PRIMITIVE") {
             break;
-        } else {
+        } else
+        {
             continue;
         }
     }
@@ -378,7 +823,6 @@ const Scene * parceScene(const std::string & fileName)
                 iss >> plane.m_normal.x >> plane.m_normal.y >> plane.m_normal.z;
                 object.m_primitive = plane;
             }
-
         } else if (key == "POSITION") {
             iss >> object.m_position.x >> object.m_position.y >> object.m_position.z;
         } else if (key == "COLOR") {
@@ -386,6 +830,15 @@ const Scene * parceScene(const std::string & fileName)
         } else if (key == "ROTATION") {
             iss >> object.m_rotation.x >> object.m_rotation.y
                 >> object.m_rotation.z >> object.m_rotation.w;
+        }
+        else if (key == "METALLIC" || key == "DIELECTRIC") {
+            if(key == "METALLIC" )
+                object.m_objectMaterial = OM_METALLIC;
+            else if(key == "DIELECTRIC" )
+                object.m_objectMaterial = OM_DIELECTRIC;
+        }
+        else if (key == "IOR") {
+            iss >> object.m_ior;
         }
     } while (std::getline(file, line));
     p_scene->m_sceneObjects.push_back(object);
@@ -397,10 +850,17 @@ const Scene * parceScene(const std::string & fileName)
 
 int main(int argc, char *argv[])
 {
+
+    glm::vec3 v(0.22, 0.33, 0.54);
+    glm::vec4 q(0.1, 0.93, 0.34, 0.56);
+    glm::vec3 v1 = rotate(v, q);
+
+    std::cout << "start" << std::endl;
     assert(argc == 3);
     const Scene * scene = parceScene(argv[1]);
     scene->render();
     scene->save(argv[2]);
+    std::cout << "finish" << std::endl;
     return 0;
 }
 
