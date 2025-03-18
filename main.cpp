@@ -689,6 +689,17 @@ const Scene * parceScene(const std::string & fileName)
     size_t canvasW, canvasH;
 
     std::string line;
+
+    LIGHT_TYPE lightType = LT_UNKNOWN;
+
+    // Все возможные параметры источников
+    glm::vec3 lightIntensity;
+
+    glm::vec3 lightPosition;
+    glm::vec3 lightAttenuation;
+
+    glm::vec3 lightDirection;
+
     while (std::getline(file, line))
     {
         std::istringstream iss(line);
@@ -723,61 +734,37 @@ const Scene * parceScene(const std::string & fileName)
             float x, y, z;
             iss >> x >> y >> z;
             p_scene->m_ambientLight = glm::vec3(x, y, z);
-        } else if(key == "NEW_LIGHT")
-        {
-
-            LIGHT_TYPE lightType = LT_UNKNOWN;
-
-            // Все возможные параметры источников
-            glm::vec3 lightIntensity;
-
-            glm::vec3 lightPosition;
-            glm::vec3 lightAttenuation;
-
-            glm::vec3 lightDirection;
-
-            while (std::getline(file, line))
+        } else if(key == "NEW_LIGHT") {
+            if(lightType != LT_UNKNOWN)
             {
-                std::istringstream iss(line);
-                std::string key;
-                iss >> key;
-                if (key == "") {
-
-                    assert(lightType != LT_UNKNOWN);
-                    if(lightType == LT_POINT)
-                    {
-                        p_scene->m_lights.push_back(new PointLight(lightIntensity, lightPosition, lightAttenuation));
-                    }
-                    else if( lightType == LT_DIRECTIONAL)
-                    {
-                        p_scene->m_lights.push_back(new DirectionalLight(lightIntensity, lightDirection));
-                    }
-
-                    break;
-                } else if (key == "LIGHT_INTENSITY") {
-                    float x, y, z;
-                    iss >> x >> y >> z;
-                    lightIntensity = {x, y ,z};
-                } else if (key == "LIGHT_DIRECTION") {
-                    lightType = LT_DIRECTIONAL;
-                    float x, y, z;
-                    iss >> x >> y >> z;
-                    lightDirection = {x, y ,z};
-                } else if (key == "LIGHT_POSITION") {
-                    lightType = LT_POINT;
-                    float x, y, z;
-                    iss >> x >> y >> z;
-                    lightPosition = {x, y ,z};
-                } else if (key == "LIGHT_ATTENUATION") {
-                    lightType = LT_POINT;
-                    float x, y, z;
-                    iss >> x >> y >> z;
-                    lightAttenuation = {x, y ,z};
-                } else {
-                    continue;
+                if(lightType == LT_POINT)
+                {
+                    p_scene->m_lights.push_back(new PointLight(lightIntensity, lightPosition, lightAttenuation));
+                }
+                else if( lightType == LT_DIRECTIONAL)
+                {
+                    p_scene->m_lights.push_back(new DirectionalLight(lightIntensity, lightDirection));
                 }
             }
-
+        } else if (key == "LIGHT_INTENSITY") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            lightIntensity = {x, y ,z};
+        } else if (key == "LIGHT_DIRECTION") {
+            lightType = LT_DIRECTIONAL;
+            float x, y, z;
+            iss >> x >> y >> z;
+            lightDirection = {x, y ,z};
+        } else if (key == "LIGHT_POSITION") {
+            lightType = LT_POINT;
+            float x, y, z;
+            iss >> x >> y >> z;
+            lightPosition = {x, y ,z};
+        } else if (key == "LIGHT_ATTENUATION") {
+            lightType = LT_POINT;
+            float x, y, z;
+            iss >> x >> y >> z;
+            lightAttenuation = {x, y, z};
         } else if(key == "NEW_PRIMITIVE") {
             break;
         } else
@@ -785,6 +772,19 @@ const Scene * parceScene(const std::string & fileName)
             continue;
         }
     }
+
+
+    if(lightType == LT_POINT)
+    {
+        p_scene->m_lights.push_back(new PointLight(lightIntensity, lightPosition, lightAttenuation));
+    }
+    else if( lightType == LT_DIRECTIONAL)
+    {
+        p_scene->m_lights.push_back(new DirectionalLight(lightIntensity, lightDirection));
+    }
+
+
+
     p_scene->p_canvas = new Canvas(canvasW, canvasH);
     cameraParams.setFovY(canvasW, canvasH);
     p_scene->p_camera = new Camera(cameraParams);
