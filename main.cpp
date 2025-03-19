@@ -177,8 +177,7 @@ struct SceneObject
             intersection.distance = t1 > 0 ? t1 : t2;
             intersection.fromOutside = t1 > 0;
             glm::vec3 interPoint = ray.from + intersection.distance * ray.direction;
-            intersection.normal = interPoint / ellipsoid.m_radiuses;
-
+            intersection.normal = glm::normalize( interPoint / ellipsoid.m_radiuses / ellipsoid.m_radiuses);
             intersection.normal = rotate(intersection.normal, m_rotation);
 
             if (!intersection.fromOutside)
