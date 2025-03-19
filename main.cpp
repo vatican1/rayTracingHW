@@ -49,7 +49,7 @@ struct Ray
     glm::vec3 from;
     glm::vec3 direction;
 
-    void shiftStart(const float & dist = 1e-3)
+    void shiftStart(const float & dist = 1e-4)
     {
         from += direction * dist;
     }
