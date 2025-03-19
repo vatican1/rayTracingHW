@@ -507,7 +507,7 @@ struct Scene
     std::optional<glm::vec3> colorFromRay(const Ray & ray, int currDepth) const
     {
         ++currDepth;
-        if(currDepth >= m_rayDepth)
+        if(currDepth > m_rayDepth)
         {
             return std::make_optional(glm::vec3(0.f, 0.f, 0.f));
         }
@@ -567,7 +567,7 @@ struct Scene
                 reflectionCoefficient = R0 + (1.f - R0) * std::pow(1.f - cosIn, 5.f);
             }
 //!---------------------------------------------------------------------------------------------------
-            glm::vec3 dir1 = ray.direction + intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
+            glm::vec3 dir1 = ray.direction - intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
             Ray reflectRay(intersectionEnd, dir1);
             reflectRay.shiftStart();
             const std::optional<glm::vec3> appendColor1 = colorFromRay(reflectRay, currDepth);
@@ -592,7 +592,7 @@ struct Scene
             {
                 currColor = (1 - reflectionCoefficient) * appendColor2.value();
                 if(intersection.fromOutside)
-                    intersection.color *= object.m_color;
+                    currColor *= object.m_color;
             }
             else
                 currColor = (1 - reflectionCoefficient) * m_bgColor;
