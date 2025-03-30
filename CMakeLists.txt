@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 
-project(hw1 LANGUAGES CXX)
+project(RayTracer LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,14 +9,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(glm)
 
 # Add the executable target for your project
-add_executable(hw1 main.cpp)
+add_executable(RayTracer main.cpp)
 
 # Link glm to your target
-target_link_libraries(hw1 PRIVATE glm::glm)
+target_link_libraries(RayTracer PRIVATE glm::glm)
 
 # Install configuration
 include(GNUInstallDirs)
-install(TARGETS hw1
+install(TARGETS RayTracer
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
