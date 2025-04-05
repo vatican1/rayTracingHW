@@ -305,12 +305,12 @@ struct Canvas
     size_t w;
     size_t h;
 
-    void setPixelColor(const size_t i, const size_t j, const glm::vec3 & colorF)
+    inline void setPixelColor(const size_t i, const size_t j, const glm::vec3 & colorF)
     {
         OutputColor color;
-        color.r = colorF.x * 255.0;
-        color.g = colorF.y * 255.0;
-        color.b = colorF.z * 255.0;
+        color.r = std::round(std::clamp(colorF.x * 255.0, 0.0, 255.0));
+        color.g = std::round(std::clamp(colorF.y * 255.0, 0.0, 255.0));
+        color.b = std::round(std::clamp(colorF.z * 255.0, 0.0, 255.0));
         data.at(i + j * w) = color;
     }
 
