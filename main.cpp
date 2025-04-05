@@ -7,6 +7,8 @@
 
 #include <glm/glm.hpp>
 
+#include <random>
+
 
 inline glm::vec3 rotate(const glm::vec3 v, const glm::vec4 q) {
     const glm::vec3 u = glm::vec3(q.x, q.y, q.z);
@@ -28,6 +30,22 @@ inline glm::vec3 acesTonemap(const glm::vec3 & x) {
     const float d = 0.59f;
     const float e = 0.14f;
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+
+
+glm::vec3 generateSphereDir()
+{
+
+    std::uniform_real_distribution<> genH(-1.f, 1.f);
+    std::uniform_real_distribution<> genAng(0, 2.f * M_PI);
+    static std::minstd_rand gen;
+
+    const float ang = genAng(gen);
+    const float height = genH(gen);
+
+    const float proj = std::sqrt(1 - height * height);
+
+    return glm::vec3(proj * std::cos(ang), proj * std::sin(ang), height);
 }
 
 struct Intersection
@@ -120,7 +138,7 @@ enum OBJECT_MATERIAL
 {
     OM_METALLIC = 0,
     OM_DIELECTRIC,
-    OM_DIFUSS
+    OM_DIFFUSE
 };
 
 
@@ -130,8 +148,9 @@ struct SceneObject
     glm::vec3 m_position = glm::vec3(0.f, 0.f, 0.f);
     glm::vec4 m_rotation = glm::vec4(0.f, 0.f, 0.f, 1.f);
     glm::vec3 m_color;
+    glm::vec3 m_emission = glm::vec3(0.f, 0.f, 0.f);;
 
-    OBJECT_MATERIAL m_objectMaterial = OM_DIFUSS;
+    OBJECT_MATERIAL m_objectMaterial = OM_DIFFUSE;
     float m_ior;
 
 
@@ -479,6 +498,7 @@ struct Scene
     glm::vec3 m_bgColor;
 
     int m_rayDepth;
+    int m_samples;
     glm::vec3 m_ambientLight;
 
     Canvas * p_canvas;
@@ -490,9 +510,13 @@ struct Scene
 
     Ray canvasToCamera(int x, int y) const
     {
+        std::uniform_real_distribution<> genShift(0.f, 1.f);
+        static std::minstd_rand gen;
+        float shift = genShift(gen);
+
         glm::vec3 t;
-        t.x =  (2.f * (float(x) + 0.5f) / float(p_canvas->w) - 1.0) * std::tan(p_camera->getFovX() / 2);
-        t.y = -(2.f * (float(y) + 0.5f) / float(p_canvas->h) - 1.0) * std::tan(p_camera->getFovY() / 2);
+        t.x =  (2.f * (float(x) + shift) / float(p_canvas->w) - 1.0) * std::tan(p_camera->getFovX() / 2);
+        t.y = -(2.f * (float(y) + shift) / float(p_canvas->h) - 1.0) * std::tan(p_camera->getFovY() / 2);
         t.z = 1;
 
         glm::vec3 d(0.f, 0.f, 0.f);
@@ -503,12 +527,12 @@ struct Scene
         return Ray(p_camera->getPosition(), d);
     }
 
-    std::optional<glm::vec3> colorFromRay(const Ray & ray, int currDepth) const
+    glm::vec3 colorFromRay(const Ray & ray, int currDepth) const
     {
         ++currDepth;
         if(currDepth > m_rayDepth)
         {
-            return std::make_optional(glm::vec3(0.f, 0.f, 0.f));
+            return glm::vec3(0.f, 0.f, 0.f);
         }
 
         int objNumber;
@@ -516,39 +540,25 @@ struct Scene
         std::tie(objNumber, distanceToObject) = findNearestObject(ray);
         if(objNumber == -1)
         {
-            return std::nullopt;
+            return m_bgColor;
         }
 
         const SceneObject & object = m_sceneObjects[objNumber];
         Intersection intersection = object.intersectFull(ray);
+        intersection.color = object.m_emission;
 
         glm::vec3 intersectionEnd = ray.from + ray.direction * intersection.distance; // Пересечение объекта и луча из камеры
 
-        if(object.m_objectMaterial == OM_DIFUSS)
+        if(object.m_objectMaterial == OM_DIFFUSE)
         {
-            intersection.color = object.m_color * m_ambientLight;
-            for (const Light * light : m_lights)
-            {
-                Ray rayToLight = light->rayFrom(intersectionEnd);
-                rayToLight.shiftStart();
-                bool isObscured;
-                {
-                    int objNumberIntersect;
-                    float distanceToObjectIntersect;
-                    std::tie(objNumberIntersect, distanceToObjectIntersect) = findNearestObject(rayToLight);
-                    if(objNumberIntersect == -1)
-                        isObscured =  false;
-                    else
-                        isObscured = light->isObscuredObject(rayToLight, distanceToObjectIntersect);
-                }
-                if(isObscured)
-                    continue;
+            glm::vec3 direction = generateSphereDir();
+            if (dot(direction, intersection.normal) < 0)
+                direction = -direction;
+            Ray reflectedRay (intersectionEnd, direction);
+            reflectedRay.shiftStart();
+            const glm::vec3 reflectedColor = colorFromRay(reflectedRay, currDepth);
 
-                glm::vec3 light_color = light->colorDist(intersectionEnd);
-
-                light_color = light_color * std::max(0.f, dot(rayToLight.direction, intersection.normal));
-                intersection.color += m_sceneObjects[objNumber].m_color * light_color;
-            }
+            intersection.color += reflectedColor * object.m_color * 2.f * dot(direction, intersection.normal);
             return  intersection.color;
         }
         else if(object.m_objectMaterial == OM_DIELECTRIC)
@@ -560,42 +570,50 @@ struct Scene
             const float sinOut = (eta1 / eta2) * std::sqrt(1 - cosIn * cosIn);
 
             float reflectionCoefficient = 1.f;
+            float randomDir = 0.f;
             if (sinOut < 1.f)
             {
                 const float R0 = std::pow((eta1 - eta2) / (eta1 + eta2), 2.f);
                 reflectionCoefficient = R0 + (1.f - R0) * std::pow(1.f - cosIn, 5.f);
+                std::uniform_real_distribution<> genDir(0.f, 1.f);
+                static std::minstd_rand gen;
+                randomDir = genDir(gen);
             }
 //!---------------------------------------------------------------------------------------------------
-            glm::vec3 dir1 = ray.direction - intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
-            Ray reflectRay(intersectionEnd, dir1);
-            reflectRay.shiftStart();
-            const std::optional<glm::vec3> appendColor1 = colorFromRay(reflectRay, currDepth);
-
-            if (appendColor1)
-                intersection.color += reflectionCoefficient * appendColor1.value();
-            else
-                intersection.color += reflectionCoefficient * m_bgColor;
-//!---------------------------------------------------------------------------------------------------
-            if(sinOut >= 1.f)
-                return intersection.color;
-
-            float cosOut = std::sqrt(1 - sinOut * sinOut);
-            const glm::vec3 dir2 = (eta1 / eta2) * ray.direction + ((eta1 / eta2) * cosIn - cosOut) * intersection.normal;
-
-            Ray reflectRay2(intersectionEnd, dir2);
-            reflectRay2.shiftStart();
-            const std::optional<glm::vec3> appendColor2 = colorFromRay(reflectRay2, currDepth);
-
-            glm::vec3 currColor(0.f, 0.f, 0.f);
-            if (appendColor2)
+            if(randomDir < reflectionCoefficient)
             {
-                currColor = (1 - reflectionCoefficient) * appendColor2.value();
+                glm::vec3 dir1 = ray.direction - intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
+                Ray reflectRay(intersectionEnd, dir1);
+                reflectRay.shiftStart();
+                const glm::vec3 appendColor1 = colorFromRay(reflectRay, currDepth);
+
+                intersection.color += appendColor1;
+
+            }
+//!---------------------------------------------------------------------------------------------------
+            else
+            {
+                if(sinOut >= 1.f)
+                {
+                    assert(false);
+                    return intersection.color;
+                }
+
+                float cosOut = std::sqrt(1 - sinOut * sinOut);
+                const glm::vec3 dir2 = (eta1 / eta2) * ray.direction + ((eta1 / eta2) * cosIn - cosOut) * intersection.normal;
+
+                Ray reflectRay2(intersectionEnd, dir2);
+                reflectRay2.shiftStart();
+                const glm::vec3 appendColor2 = colorFromRay(reflectRay2, currDepth);
+
+                glm::vec3 currColor(0.f, 0.f, 0.f);
+
+                currColor = appendColor2;
                 if(intersection.fromOutside)
                     currColor *= object.m_color;
+
+                intersection.color += currColor;
             }
-            else
-                currColor = (1 - reflectionCoefficient) * m_bgColor;
-            intersection.color += currColor;
 //!---------------------------------------------------------------------------------------------------
             return intersection.color;
         }
@@ -604,16 +622,15 @@ struct Scene
             glm::vec3 dir = ray.direction - intersection.normal * dot(intersection.normal, ray.direction) * 2.f;
             Ray reflectRay(intersectionEnd, dir);
             reflectRay.shiftStart();
-            const std::optional<glm::vec3> appendColor = colorFromRay(reflectRay, currDepth);
+            const glm::vec3 appendColor = colorFromRay(reflectRay, currDepth);
 
-            if (appendColor)
-                intersection.color += object.m_color * appendColor.value();
-            else
-                intersection.color += object.m_color * m_bgColor;
+            intersection.color += object.m_color * appendColor;
+
 
             return intersection.color;
         }
-        return std::nullopt;
+        assert(false);
+        return glm::vec3(0.f, 0.f, 0.f);
     }
 
     void render() const
@@ -624,20 +641,18 @@ struct Scene
             return;
         }
 
+#pragma  omp parallel for collapse(2)
         for (int i = 0; i < p_canvas->w; ++i)
         {
             for (int j = 0; j < p_canvas->h; ++j)
             {
-                const Ray ray = canvasToCamera(i, j);
-
-                glm::vec3 color;
-
-                std::optional<glm::vec3> colorOpt = colorFromRay(ray, 0);
-                if(!colorOpt)
-                    color  = m_bgColor;
-                else
-                    color = colorOpt.value();
-
+                glm::vec3 color(0.f, 0.f, 0.f);
+                for(int s = 0; s < m_samples; ++s)
+                {
+                    const Ray ray = canvasToCamera(i, j);
+                    color += colorFromRay(ray, 0);
+                }
+                color /= float(m_samples);
                 color = acesTonemap(color);
                 color = glm::pow(color, glm::vec3(1.f / 2.2f));
 
@@ -729,6 +744,8 @@ const Scene * parceScene(const std::string & fileName)
             iss >> cameraParams.m_cameraFovX;
         } else if (key == "RAY_DEPTH") {
             iss >> p_scene->m_rayDepth;
+        } else if (key == "SAMPLES") {
+            iss >> p_scene->m_samples;
         } else if (key == "AMBIENT_LIGHT") {
             float x, y, z;
             iss >> x >> y >> z;
@@ -826,6 +843,8 @@ const Scene * parceScene(const std::string & fileName)
             iss >> object.m_position.x >> object.m_position.y >> object.m_position.z;
         } else if (key == "COLOR") {
             iss >> object.m_color.x >> object.m_color.y >> object.m_color.z;
+        } else if (key == "EMISSION") {
+            iss >> object.m_emission.x >> object.m_emission.y >> object.m_emission.z;
         } else if (key == "ROTATION") {
             iss >> object.m_rotation.x >> object.m_rotation.y
                 >> object.m_rotation.z >> object.m_rotation.w;
